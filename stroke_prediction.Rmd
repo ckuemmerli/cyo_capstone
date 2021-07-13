@@ -1,0 +1,478 @@
+---
+title: "Stroke Prediction"
+author: "Christoph Kuemmerli"
+date: "30 3 2021"
+output:
+  word_document:
+    toc: true # with table of content
+    toc_depth: 2  # up to two depths of headings
+    number_sections: true # numbers to add to header
+subtitle: HarvardX PH125.9x Capstone, Choose Your Own Project
+---
+
+\newpage
+
+
+# Introduction
+
+      
+Stroke is a neurological disease that occurs when the oxygen supply to the vulnerable brain tissue is diminished. It is often disabilitating because brain tissue barely regenerates and about 3 % of the population is affected over a lifetime. Prevention therefore is of paramount importance. However, preventive measures like medication (primary prevention) may have side effects. Hence, risk-adjusted interventions should be applied.\ In this study, a machine learning algorithm to predict stroke in an adult population was trained and validated with the goal to predict stroke. The data used is publicly available on https://www.kaggle.com/fedesoriano/stroke-prediction-dataset. Data data will be imported, cleaned, explored and preprocessed. The modeling approach included logistic regression, random forest and k-nearest neighbor techniques. The predicted class was compared between models to find the best fit. As a performance metric, sensitivity will be given priority because we try not to miss a stroke at the expense of false positive results with the consequence of an overtreatment of people who will never have a stroke.
+
+
+\newpage
+
+
+# Methods
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, error = FALSE, dpi =
+300, fig.align = "center")
+```
+
+## Relevant packages are installed and loaded.\
+```{r packages required, results = 'hide'}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(knitr)) install.packages("knitr", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(e1071)) install.packages("e1071", repos = "http://cran.us.r-project.org")
+if(!require(tableone)) install.packages("tablone", repos = "http://cran.us.r-project.org")
+if(!require(corrplot)) install.packages("corrplot", repos = "http://cran.us.r-project.org")
+if(!require(MLeval)) install.packages("MLeval", repos = "http://cran.us.r-project.org")
+if(!require(zoo)) install.packages("zoo", repos = "http://cran.us.r-project.org")
+if(!require(xts)) install.packages("xts", repos = "http://cran.us.r-project.org")
+if(!require(quantmod)) install.packages("quantmod", repos = "http://cran.us.r-project.org")
+if(!require(DMwR)) install.packages("https://cran.r-project.org/src/contrib/Archive/DMwR/DMwR_0.4.1.tar.gz", repos=NULL, type="source" )
+if(!require(kernlab)) install.packages("kernlab", repos = "http://cran.us.r-project.org")
+if(!require(markdown)) install.packages("markdown", repos = "http://cran.us.r-project.org")
+if(!require(rmarkdown)) install.packages("rmarkdown", repos = "http://cran.us.r-project.org")
+```
+
+## Import from the github repository\
+```{r import}
+data <- read.csv("https://raw.githubusercontent.com/ckuemmerli/cyo_capstone/main/healthcare-dataset-stroke-data.csv")
+```
+
+The structure of the data and the first six observations are displayed below.\
+```{r inspection}
+str(data)
+head(data)
+```
+The codebook looks like this:\
+1) id: unique identifier\
+2) gender: "Male", "Female" or "Other"\
+3) age: age of the patient\
+4) hypertension: 0 if the patient doesn't have hypertension, 1 if the patient has hypertension\
+5) heart_disease: 0 if the patient doesn't have any heart diseases, 1 if the patient has a heart disease\
+6) ever_married: "No" or "Yes"\
+7) work_type: "children", "Govt_jov", "Never_worked", "Private" or "Self-employed"\
+8) Residence_type: "Rural" or "Urban"\
+9) avg_glucose_level: average glucose level in blood\
+10) bmi: body mass index\
+11) smoking_status: "formerly smoked", "never smoked", "smokes" or "Unknown"*\
+12) stroke: 1 if the patient had a stroke or 0 if not\
+
+The dataset contains 5110 observations with 12 variables. *Stroke* is the outcome or dependent variable.
+
+## Data cleaning
+
+First, non-adults are excluded.\
+```{r exclude non-adults}
+data <- filter(data, age >= 18)
+```
+
+
+Class and levels of variables are changed as appropriate.\
+```{r levels of variables, echo = FALSE, results = 'hide'}
+data$bmi <- as.numeric(data$bmi)
+
+factor_variables <- c("gender", "hypertension", "heart_disease", "ever_married", "work_type", "Residence_type", "smoking_status", "stroke")
+data[factor_variables] <- lapply(data[factor_variables], factor)
+
+sapply(data[factor_variables], levels)
+
+levels(data$hypertension) <- list("hypertension"= "1", "no_hypertension" = "0")
+levels(data$heart_disease) <- list("heart_disease" = "1", "no_heart_disease" = "0")
+levels(data$ever_married) <- list("married" = "Yes", "not_married" = "No")
+levels(data$stroke) <- list("stroke" = "1", "no_stroke" = "0")
+```
+
+
+### Missing values
+All variables are assessed for the percentage of missing values.\
+```{r missing data, echo = FALSE}
+missing_values <- data %>% gather(key = "key", value = "val") %>%
+  mutate(is.missing = is.na(val)) %>%
+  group_by(key, is.missing) %>%
+  summarise(num.missing = n()) %>%
+  filter(is.missing==T) %>%
+  select(-is.missing) %>%
+  arrange(desc(num.missing))
+
+kable(mutate(missing_values, percent_missing = num.missing/nrow(data)*100))
+```
+Only 201 values are missing for *bmi*.\
+For data exploration only, *bmi* is categorized according to the WHO definition. (1)
+```{r bmi categorisation, echo = FALSE}
+data <- data %>% mutate(bmi_class = ifelse(bmi < 25, "normal",
+                                          ifelse(bmi < 30,
+                                                 "overweight",
+                                                 "obese")))
+data$bmi_class <- as.factor(data$bmi_class)
+table(data$stroke, data$bmi_class) %>% kable()
+factor_variables <- c(factor_variables, "bmi_class")
+```
+
+
+The structure of the data now looks like the following.\
+```{r}
+str(data)
+```
+
+
+## Split the dataset
+First create the data partition based on the dependent variable *stroke* and 80% of observations will be used to train the algorithm. Due to the number of observations, a ratio  of 80:20 for train and test dataset shouldn't cause problems.\
+```{r data split}
+set.seed(123, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+
+test_index <- createDataPartition(data$stroke,
+                                  times = 1,
+                                  p = 0.2,
+                                  list = FALSE)
+```
+
+Split the datasets into train and test set.\
+```{r}
+trainset <- data[-test_index,]
+
+testset <- data[test_index,]
+```
+
+
+## Data exploration
+Using the appropriate class of the objects, a summary is displayed. In addition, barplots for all factor variables are created.\
+```{r summary and barplots, echo = FALSE}
+summary(trainset[, -1])
+
+barplots <- function(x){
+  ggplot(trainset, aes(x)) +
+    geom_bar() +
+    xlab("") +
+    theme_minimal()
+}
+
+lapply(trainset[, factor_variables], barplots)
+```
+
+The dependent variable *stroke* is imbalanced, meaning that the two possible outcome (developing a *stroke* or not) have a different prevalence in this dataset. This will cause problems later during model building and has to be addressed. Apart from the imbalanced dependent variable, also heart disease has a low prevalence.
+To assess the necessity of imputation, the prevalence of *stroke* in the incomplete cases (with missing *bmi*) is checked.\
+
+```{r, echo = FALSE}
+select(data, bmi, stroke) %>%
+  filter(is.na(bmi) & stroke %in% "stroke") %>%
+  count()
+```
+These observations have a high prevalence of *stroke*. Hence, due to the low prevalence of *stroke* in the entire dataset, we want to keep these observations. Therefore, imputation is carried out after splitting the dataset into train and test set.\
+
+## SMOTE (Synthetic Minority Oversampling Technique)
+To address the issue of imbalance with "no stroke" being much more prevalent and *stroke* a rare event, synthetic minority oversampling technique (SMOTE) is introduced. SMOTE is an approach to the construction of classifiers from imbalanced datasets. A dataset is imbalanced if the classification categories are not equally represented (e.g. 50 % of observations have a stroke and the others don't). Data sets are often composed of "normal" examples with only a small percentage of "abnormal" or "interesting" examples, e.g. having a stroke. It is also the case that the cost of misclassifying an "interesting" example as a normal example is often much higher than the cost of the reverse error, i.e. to classify a normal example as an "interesting" one. Often, one speaks of a "minority" and "majority" class. The minority class is underrepresented (stroke in this dataset). To balance the data, several options are available. The first is gather more data, surely the preferable approach, but often not possible. Resampling is another option. In this case, under-sampling of the majority class or over-sampling of the minority class is carried out. SMOTE generates new minority instances between existing instances. The new instances created are not just a copy of existing minority cases. The algorithm takes sample of feature space for each target class and its neighbors and then generates new instances that combine the features of the target cases with features of its neighbors.
+
+SMOTE takes the entire dataset as an input, but it increases the percentage of only the minority cases.
+
+Other approaches are up or downsampling. We could also use subsampling inside the train function and like below, outside the train function.\
+
+## Confounders
+A confounder is a variable that influences both the dependent variable or outcome variable and the independent variable or feature. Based on the exploratory analysis, age may influence som features.\
+```{r confounding, echo = FALSE}
+trainset %>% group_by(work_type) %>% summarise(mean = mean(age)) %>% kable()
+trainset %>% group_by(hypertension) %>% summarise(mean = mean(age)) %>% kable()
+trainset %>% group_by(Residence_type) %>% summarise(mean = mean(age)) %>% kable()
+trainset %>% group_by(smoking_status) %>% summarise(mean = mean(age)) %>% kable()
+```
+
+As suspected, age influences features. Older people are more often self-employed, have hypertension and quit smoking. Our model will perhaps perform better if these variables will be excluded later.\
+
+## Discrimination
+The discriminatory ability of numeric predictor variables is assessed with feature plots.\
+```{r discriminatory numeric variables, echo = FALSE}
+featurePlot(trainset[, c(3,9,10)], 
+            y = trainset$stroke, 
+            plot = "density",
+            strip=strip.custom(par.strip.text=list(cex=.7)),
+            scales = list(x = list(relation="free"),
+                          y = list(relation="free")),
+            main = "Discriminatory variables")
+```
+Age seems to have the best discriminatory ability to distinguish between patient who develop a stroke and people who don't. We would expect a higher prevalence of stroke in older people due to the higher prevalence of cardiovascular risk factors in this population (see also confounding above). 
+
+When comparing all features stratified by developing the outcome *stroke*, this table results.\
+```{r tableone, echo = FALSE}
+CreateTableOne(vars = c(factor_variables[-8],"age","bmi","avg_glucose_level"),
+               data = trainset,
+               strat = "stroke",
+               addOverall = T)
+```
+
+## Collinearity
+To assess collinearity, a correlation plot for numeric variables is used.\
+```{r correlation, echo = FALSE}
+corr <- select(trainset, age, avg_glucose_level, bmi) %>%
+  na.omit() %>%
+  cor()
+corrplot(corr, method = "number", cl.pos = "n")
+```
+There is no relevant correlation between the features.
+
+## Coding
+Now, categories with few subjects are removed and manual dummy coding is carried out. We do this separately with the train and test datasets.\
+```{r dummy coding, echo = FALSE}
+trainset <- filter(trainset, gender %in% c('Female', 'Male'))
+trainset <- filter(trainset, work_type %in% c('Govt_job', 'Private', 'Self-employed'))
+
+levels(trainset$hypertension) <- list("1"= "hypertension", "0" = "no_hypertension")
+levels(trainset$heart_disease) <- list("1" = "heart_disease", "0" = "no_heart_disease")
+levels(trainset$gender) <- list("1" = "Female", "0" = "Male")
+levels(trainset$ever_married) <- list("1" = "married", "0" = "not_married")
+levels(trainset$work_type) <- list("1" = "Govt_job", "1" = "Private", "0" = "Self-employed")
+levels(trainset$Residence_type) <- list("1" = "Rural", "0" = "Urban")
+levels(trainset$smoking_status) <- list("3" = "formerly smoked", "2" = "never smoked", "1" = "smokes", "0" = "Unknown")
+levels(trainset$ever_married) <- list("1" = "married", "0" = "not_married")
+
+testset <- filter(testset, gender %in% c('Female', 'Male'))
+testset <- filter(testset, work_type %in% c('Govt_job', 'Private', 'Self-employed'))
+
+levels(testset$hypertension) <- list("1"= "hypertension", "0" = "no_hypertension")
+levels(testset$heart_disease) <- list("1" = "heart_disease", "0" = "no_heart_disease")
+levels(testset$gender) <- list("1" = "Female", "0" = "Male")
+levels(testset$ever_married) <- list("1" = "married", "0" = "not_married")
+levels(testset$work_type) <- list("1" = "Govt_job", "1" = "Private", "0" = "Self-employed")
+levels(testset$Residence_type) <- list("1" = "Rural", "0" = "Urban")
+levels(testset$smoking_status) <- list("3" = "formerly smoked", "2" = "never smoked", "1" = "smokes", "0" = "Unknown")
+levels(testset$ever_married) <- list("1" = "married", "0" = "not_married")
+```
+
+
+## Feature selection
+Based on exploration and clinical knowledge, the features are selected. The class is changed to numeric.\
+```{r feature selection}
+trainset <- select(trainset,
+                   gender,
+                   age,
+                   hypertension,
+                   work_type,
+                   avg_glucose_level,
+                   bmi,
+                   smoking_status,
+                   stroke)
+
+trainset[, 1:7] <- sapply(trainset[, 1:7], as.numeric)
+
+testset <- select(testset,
+                  gender,
+                  age,
+                  hypertension,
+                  work_type,
+                  avg_glucose_level,
+                  bmi,
+                  smoking_status,
+                  stroke)
+
+testset[, 1:7] <- sapply(testset[, 1:7], as.numeric)
+```
+
+## Imputation
+Because we want to keep the many events in the group with missing bmi values, mean imputation, separately for train and test dataset, is performed.\
+```{r}
+trainset$bmi[is.na(trainset$bmi)] <- mean(trainset$bmi, na.rm = T)
+testset$bmi[is.na(testset$bmi)] <- mean(testset$bmi, na.rm = T)
+```
+
+Remove objects no longer needed.\
+```{r}
+rm(data, test_index, missing_values, test_index, corr)
+```
+
+The machine learning algorithms used are logistic regression, random forest, k-nearest neighbor and support vector machine (SVM). The first three have been introduced and discussed in earlier courses. The SVM however has not been used in this programme so far and that why an explanation of the concept of this algorithm is provided.\
+For a dataset consisting of features set and labels set, an SVM classifier builds a model to predict classes for new examples. It assigns new data points to one of the classes. If there are only 2 classes then it can be called as a binary SVM classifier.
+There are 2 kinds of SVM classifiers, linear SVM classifier and non-linear SVM classifier.
+In the linear classifier model, training examples are assumed to be plotted in space. These data points are expected to be separated by an apparent gap. It predicts a straight hyperplane dividing the two classes. The primary focus of the hyperplane is to maximize the distance from hyperplane to the nearest data point of either class.
+When a straight line is not considered appropriate to separate the two classes, a kernel can be applied (e.g. polynomial or radial basis function) and the hyperplane is no longer linear (non-linear SVM).
+
+Performance measures have been discussed in previous courses and the following are used for this two class outcome: Sensitivity or Recall, Specificity, Precision, Receiver Operating characteristics (ROC) curve and the Area under the curve (AUC)
+
+# Results
+
+## Building models
+
+After the trainset is ready for use, the models can be built.
+First, 10-fold cross validation is applied and because we want to use sensitivity, specificity and ROC with AUC to assess performance, class probabilities and the twoClassSummary is added.\
+```{r trainControl}
+ctrl <- trainControl(
+  method = "cv",
+  number = 10,
+  savePredictions = "final",
+  classProbs = T,
+  summaryFunction = twoClassSummary)
+```
+
+
+### Model 1
+Logistic regression using the caret package and the train function. This algorithm is chosen to start with because it is well-known and often used to solve classification problems.
+Due to different ranges of age, glucose and bmi, data is centered and scaled for this and all other models. Because we will later use the AUC to assess model performance, the metric *ROC* is added. The data is preprocessed due to the different range of *age*, *glucose* and *bmi*.\
+```{r model 1}
+set.seed(123, sample.kind="Rounding")
+glmFit <- train(stroke ~ ., data = trainset,
+                method = "glm",
+                family = "binomial",
+                trControl = ctrl,
+                preProcess = (c("center", "scale")),
+                metric = "ROC")
+evalm(glmFit, positive = "stroke", plots = c("r", "pr"))$pr
+```
+
+The accuracy of the model is high but because the predictive accuracy is solely based on the majority class (*no stroke*) we miss all or almost all patients with a *stroke* and the sensitivity is zero or near zero.
+
+SMOTE is used to balance the outcome prevalence for training.
+
+```{r smote, echo = FALSE}
+set.seed(123, sample.kind="Rounding")
+smote_train <- SMOTE(stroke ~ ., data = trainset)                    
+table(smote_train$stroke) %>% kable()
+```
+
+Now, prevalence of the positive outcome *stroke* is higher and more balanced.
+
+Logistic regression is again fitted using the the smote dataset.\
+```{r model 1 with SMOTE}
+set.seed(123, sample.kind="Rounding")
+glmFit2 <- train(stroke ~ ., data = smote_train, 
+                 method = "glm",
+                 family = "binomial",
+                 trControl = ctrl,
+                 preProcess = (c("center", "scale")),
+                 metric = "ROC")
+```
+
+
+### Model 2
+Random forest with the tuning parameter mtry set from 1 to 20.\
+```{r model 2, echo = FALSE}
+tnGrid_rf <- expand.grid(mtry = seq(1,20)) # for this model, tuning parameters are available
+set.seed(123, sample.kind="Rounding")
+rfFit <- train(stroke ~ .,
+               data = smote_train,
+               method = "rf",
+               tuneGrid = tnGrid_rf,
+               trControl = ctrl,
+               preProcess = (c("center", "scale")),
+               metric = "ROC")
+rfFit$bestTune
+```
+
+
+### Model 3
+k-nearest neighbour, the tuning parameter k is set from 5 to 75 with an increment of 5.\
+```{r model 3, echo = FALSE}
+tnGrid_knn <- data.frame(k = seq(5, 75, 5))
+set.seed(123, sample.kind="Rounding")
+knnFit <- train(stroke ~ .,
+                data = smote_train,
+                method = "knn",
+                trControl = ctrl,
+                tuneGrid = tnGrid_knn,
+                metric = "ROC")
+plot(knnFit)
+```
+
+### Model 4
+support vector machine (non-linear) without tuning.\
+```{r model 4, echo = FALSE}
+set.seed(123, sample.kind="Rounding")
+svmFit <- train(stroke ~.,
+                    data = smote_train,
+                    method = "svmPoly",
+                    trControl = ctrl,
+                    preProcess = c("center", "scale"),
+                    metric = "ROC")
+plot(svmFit)
+```
+
+
+The models perform as shown below:\
+Model 1: Logistic regression\
+```{r train glm}
+evalm(glmFit, positive = "stroke", plots = c("r", "pr"))$pr
+```
+
+Model 1 with SMOTE
+```{r train glm smote}
+evalm(glmFit2, positive = "stroke", plots = c("r", "pr"))$pr
+```
+
+Model 2: Random forest with SMOTE
+```{r}
+evalm(rfFit, positive = "stroke", plots = c("r", "pr"))$pr
+```
+
+Model 3: K-nearest neighbour with SMOTE
+```{r}
+evalm(knnFit, positive = "stroke", plots = c("r", "pr"))$pr
+```
+
+Model 4: Support vector machine with SMOTE
+```{r}
+evalm(svmFit, positive = "stroke", plots = c("r", "pr"))$pr
+```
+
+
+The random forest model outperforms all others with a AUC-ROC of 92% and a AUC-PR of 82%.
+\newpage
+For educational purposes only, the training data of all models is summarised.\
+```{r summary training, echo = FALSE}
+resamps <- resamples(list(GLM = glmFit,
+                          GLM_smote = glmFit2,
+                          RF = rfFit,
+                          KNN = knnFit,
+                          SVM = svmFit))
+summary(resamps)
+```
+Sensitivity and Specifity is highest for the random forest model.
+
+
+The fitted models are now used with the test set which has never been used before, neither to train the model nor to evaluate it.\
+```{r test models}
+glm_test <- confusionMatrix(predict(glmFit, testset), testset$stroke)
+glm2_test <- confusionMatrix(predict(glmFit2, testset), testset$stroke)
+rf_test <- confusionMatrix(data = predict(rfFit, testset), reference = testset$stroke)
+knn_test <- confusionMatrix(data = predict(knnFit, testset), reference = testset$stroke)
+svm_test <- confusionMatrix(data = predict(svmFit, testset), reference = testset$stroke)
+```
+
+As the output of the confusion matrix is confusing, below is a summary./
+```{r test summary, echo = FALSE}
+tibble(Model = c("Logistic regression", "Logistic regression with SMOTE", "Random forest with SMOTE", "K-nearest neighbour with SMOTE", "Support vector machine with SMOTE"),
+  "Accuracy" = c(glm_test$overall[1], glm2_test$overall[1], rf_test$overall[1], knn_test$overall[1], svm_test$overall[1]),
+       "Sensitivity" = c(glm_test$byClass[1], glm2_test$byClass[1], rf_test$byClass[1], knn_test$byClass[1], svm_test$byClass[1]),
+       "Specificity" = c(glm_test$byClass[2], glm2_test$byClass[2], rf_test$byClass[2], knn_test$byClass[2], svm_test$byClass[2])) %>%
+  kable()
+```
+
+Compared to the train dataset, the random forest and k-nearest neighbour show overfitting which results in an inferior performance on the test dataset compared to train set. The logistic regression model with SMOTE shows the best performance on the test set with a sensitivity of 70 % and a specifity of 72.3 %.
+
+
+\newpage
+# Conclusion
+The machine learning algorithm to predict stroke reached a sensitivity of 72 % using a logistic regression model. The AUC-ROC and AUC PR are 82 % and 71 %, respectively. The specificity of 76.2 % indicates that there is a high false positive rate. However, considering the often disabling condition after a stroke, we would rather treat some individuals (for primary prevention) who never experience a stroke than not treat individuals who will develop this severe disease. Especially because the side effects of the primary prevention with a drug treatment are minor.
+From a methodological point of view, we have encountered the frequent problem of imbalanced outcome. SMOTE was used to subsample the underrepresented minority class and the models trained on the SMOTE-data showed a much better performance. In addition, better a better validation strategy could also result in a better performance on the test set.\
+Limitations are the imputation methods used on the entire dataset, overtraining of the random forest and k-nearest neighbour model and the relatively few positive events (= stroke) that required smote that could have been carried out within the train function.
+Future research should be carried out with bigger datasets and more positive outcomes and should also focus on the increase of sensitivity and specificity of the prediction model to correctly identify the people at risk of a stroke.
+
+
+\newpage
+# Acknowledgement
+I thank the provider of the stroke prediction dataset, fedesoriano.
+
+
+\newpage
+# References\
+(1) https://www.who.int/news-room/fact-sheets/detail/obesity-and-overweight, accessed May 31, 2021
